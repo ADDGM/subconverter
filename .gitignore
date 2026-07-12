@@ -4,3 +4,19 @@ cmake-build-debug
 .idea
 base/cache
 build
+.venv/
+build-msys
+
+# Mise directories and files
+.mise-tasks
+.mise
+mise.toml
+mise-tasks
+mise
+
+# Codex/MCP local state
+.zcf
+.spec-workflow/
+.serena/
+.playwright-mcp/
+.agents/
