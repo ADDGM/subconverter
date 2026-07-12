@@ -76,6 +76,27 @@ jobs:
           ref: ${{ steps.release.outputs.tag }}
           fetch-depth: 0
 
+      - name: Validate source version
+        env:
+          RELEASE_TAG: ${{ steps.release.outputs.tag }}
+        run: |
+          SOURCE_VERSION=$(sed -nE 's/^#define[[:space:]]+VERSION[[:space:]]+"([^"]+)".*/\1/p' src/version.h)
+          EXPECTED_VERSION="${RELEASE_TAG}-mihomo"
+
+          if [[ -z "$SOURCE_VERSION" ]]; then
+            echo "Unable to read VERSION from src/version.h"
+            exit 1
+          fi
+
+          if [[ "$SOURCE_VERSION" != "$EXPECTED_VERSION" ]]; then
+            echo "Release tag and source version do not match"
+            echo "Expected source version: $EXPECTED_VERSION"
+            echo "Actual source version:   $SOURCE_VERSION"
+            exit 1
+          fi
+
+          echo "Validated source version: $SOURCE_VERSION"
+
       - name: Resolve source metadata
         id: source
         run: |
