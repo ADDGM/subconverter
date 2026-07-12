@@ -1,0 +1,28 @@
+# Git and editor metadata
+.git
+.github
+.vscode
+.idea
+.venv
+.zcf
+
+# Local build outputs
+build
+cmake-build-*
+CMakeFiles
+CMakeCache.txt
+cmake_install.cmake
+Makefile
+subconverter
+tmp
+
+# Dependency source trees created by release scripts
+curl
+yaml-cpp
+quickjspp
+libcron
+toml11
+
+# Packaged artifacts
+*.tar.gz
+*.7z

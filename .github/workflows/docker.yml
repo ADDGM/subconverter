@@ -1,21 +1,216 @@
-name: Publish Docker Image
+name: Release
+
 on:
   push:
-    branches: [ master ]
     tags:
-      - '**'
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing release tag, for example v1.2.3 or v1.3.0-beta.1"
+        required: true
+        type: string
+
+permissions:
+  contents: write
+  packages: write
 
 concurrency:
-  group: ${{ github.ref }}-${{ github.workflow }}
-  cancel-in-progress: true
+  group: release-${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+  cancel-in-progress: false
 
 env:
-  REGISTRY_IMAGE: metacubex/subconverter
-  GHCR_IMAGE: ghcr.io/metacubex/subconverter
+  DOCKER_IMAGE: ${{ vars.DOCKER_IMAGE }}
 
 jobs:
-  build-dockerhub:
+  resolve_release:
+    name: Resolve Release
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.release.outputs.tag }}
+      version: ${{ steps.release.outputs.version }}
+      minor: ${{ steps.release.outputs.minor }}
+      prerelease: ${{ steps.release.outputs.prerelease }}
+      ghcr-image: ${{ steps.source.outputs.ghcr-image }}
+      commit-sha: ${{ steps.source.outputs.commit-sha }}
+    steps:
+      - name: Resolve and validate release tag
+        id: release
+        env:
+          INPUT_TAG: ${{ inputs.tag }}
+        run: |
+          if [[ "${GITHUB_EVENT_NAME}" == "workflow_dispatch" ]]; then
+            TAG="${INPUT_TAG}"
+          else
+            TAG="${GITHUB_REF_NAME}"
+          fi
+
+          if [[ ! "$TAG" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-beta\.(0|[1-9][0-9]*))?$ ]]; then
+            echo "Release tag must use vX.Y.Z or vX.Y.Z-beta.N, for example v1.2.3 or v1.3.0-beta.1"
+            exit 1
+          fi
+
+          VERSION="${TAG#v}"
+          BASE_VERSION="${VERSION%%-*}"
+          MINOR="${BASE_VERSION%.*}"
+
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "minor=${MINOR}" >> "$GITHUB_OUTPUT"
+          if [[ "$VERSION" == *-beta.* ]]; then
+            echo "prerelease=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "prerelease=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Validate Docker Hub image setting
+        run: |
+          test -n "$DOCKER_IMAGE" || {
+            echo "Repository variable DOCKER_IMAGE is required, for example addgm/subconverter"
+            exit 1
+          }
+
+      - name: Checkout release tag
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ steps.release.outputs.tag }}
+          fetch-depth: 0
+
+      - name: Resolve source metadata
+        id: source
+        run: |
+          GHCR_IMAGE="ghcr.io/${GITHUB_REPOSITORY,,}"
+          echo "ghcr-image=${GHCR_IMAGE}" >> "$GITHUB_OUTPUT"
+          echo "commit-sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+  linux_release:
+    name: Linux ${{ matrix.arch }} Release
+    needs: resolve_release
     strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86
+            artifact: subconverter_linux32
+            os: ubuntu-latest
+          - arch: amd64
+            artifact: subconverter_linux64
+            os: ubuntu-latest
+          - arch: armv7
+            artifact: subconverter_armv7
+            os: ubuntu-24.04-arm
+          - arch: aarch64
+            artifact: subconverter_aarch64
+            os: ubuntu-24.04-arm
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: Checkout release tag
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.resolve_release.outputs.tag }}
+      - name: Build
+        run: docker run --rm -v $GITHUB_WORKSPACE:/root/workdir multiarch/alpine:${{ matrix.arch }}-latest-stable /bin/sh -c "apk add bash git nodejs npm && cd /root/workdir && chmod +x scripts/build.alpine.release.sh && bash scripts/build.alpine.release.sh"
+      - name: Package release asset
+        run: tar czf ${{ matrix.artifact }}.tar.gz subconverter
+      - name: Upload release asset
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-${{ matrix.artifact }}
+          path: ${{ matrix.artifact }}.tar.gz
+          if-no-files-found: error
+          retention-days: 1
+
+  macos_release:
+    name: macOS ${{ matrix.arch }} Release
+    needs: resolve_release
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86
+            artifact: subconverter_darwin64
+            os: macos-15-intel
+          - arch: arm
+            artifact: subconverter_darwinarm
+            os: macos-latest
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: Checkout release tag
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.resolve_release.outputs.tag }}
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Build
+        run: bash scripts/build.macos.release.sh
+      - name: Package release asset
+        run: tar czf ${{ matrix.artifact }}.tar.gz subconverter
+      - name: Upload release asset
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-${{ matrix.artifact }}
+          path: ${{ matrix.artifact }}.tar.gz
+          if-no-files-found: error
+          retention-days: 1
+
+  windows_release:
+    name: Windows ${{ matrix.arch }} Release
+    needs: resolve_release
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86
+            artifact: subconverter_win32
+            env: i686
+            msystem: MINGW32
+          - arch: amd64
+            artifact: subconverter_win64
+            env: x86_64
+            msystem: MINGW64
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: msys2 {0}
+    steps:
+      - name: Checkout release tag
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.resolve_release.outputs.tag }}
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '16'
+      - name: Setup MSYS2
+        uses: msys2/setup-msys2@v2
+        with:
+          update: true
+          install: base-devel git mingw-w64-${{ matrix.env }}-gcc mingw-w64-${{ matrix.env }}-cmake mingw-w64-${{ matrix.env }}-pcre2 patch
+          msystem: ${{ matrix.msystem }}
+          path-type: inherit
+      - name: Build
+        run: bash scripts/build.windows.release.sh
+      - name: Package release asset
+        run: 7z a ${{ matrix.artifact }}.7z subconverter/
+      - name: Upload release asset
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-${{ matrix.artifact }}
+          path: ${{ matrix.artifact }}.7z
+          if-no-files-found: error
+          retention-days: 1
+
+  build_dockerhub:
+    name: Build ${{ matrix.platform }} for Docker Hub
+    needs: resolve_release
+    strategy:
+      fail-fast: false
       matrix:
         include:
           - platform: linux/amd64
@@ -27,58 +222,37 @@ jobs:
           - platform: linux/arm64
             os: ubuntu-24.04-arm
     runs-on: ${{ matrix.os }}
-    name: Build ${{ matrix.platform }} for Docker Hub
     steps:
       - name: Prepare
         run: |
           platform=${{ matrix.platform }}
-          echo "PLATFORM_PAIR=${platform//\//-}" >> $GITHUB_ENV    
-
-      - name: Checkout base
+          echo "PLATFORM_PAIR=${platform//\//-}" >> "$GITHUB_ENV"
+      - name: Checkout release tag
         uses: actions/checkout@v4
         with:
+          ref: ${{ needs.resolve_release.outputs.tag }}
           fetch-depth: 0
-
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
-
-      - name: Docker meta
-        id: meta
-        uses: docker/metadata-action@v5
-        with:
-          images: ${{ env.REGISTRY_IMAGE }}
-          tags: |
-            type=semver,pattern={{version}}
-            type=raw,value=latest,enable={{is_default_branch}}
-      - name: Docker login
+      - name: Login to Docker Hub
         uses: docker/login-action@v3
         with:
-          username: ${{ secrets.DOCKER_USERNAME }}
-          password: ${{ secrets.DOCKER_PASSWORD }}
-
-      - name: Get commit SHA
-        if: github.ref == 'refs/heads/master'
-        id: vars
-        run: echo "sha_short=$(git rev-parse --short HEAD)" >> $GITHUB_OUTPUT
-
-      - name: Build and export
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_PASSWORD }}
+      - name: Build and export digest
         id: build
         uses: docker/build-push-action@v5
         with:
           platforms: ${{ matrix.platform }}
-          context: scripts/
-          labels: ${{ steps.meta.outputs.labels }}
-          build-args: |
-            SHA=${{ steps.vars.outputs.sha_short }}
-          outputs: type=image,name=${{ env.REGISTRY_IMAGE }},push-by-digest=true,name-canonical=true,push=true
-
+          context: .
+          file: scripts/Dockerfile
+          outputs: type=image,name=${{ env.DOCKER_IMAGE }},push-by-digest=true,name-canonical=true,push=true
       - name: Export digest
         run: |
-          rm -rf /tmp/digests-dockerhub
           mkdir -p /tmp/digests-dockerhub
           digest="${{ steps.build.outputs.digest }}"
           touch "/tmp/digests-dockerhub/${digest#sha256:}"
-      - name: Upload artifact
+      - name: Upload digest
         uses: actions/upload-artifact@v4
         with:
           name: digest-dockerhub-${{ env.PLATFORM_PAIR }}
@@ -86,8 +260,11 @@ jobs:
           if-no-files-found: error
           retention-days: 1
 
-  build-ghcr:
+  build_ghcr:
+    name: Build ${{ matrix.platform }} for GHCR
+    needs: resolve_release
     strategy:
+      fail-fast: false
       matrix:
         include:
           - platform: linux/amd64
@@ -99,59 +276,40 @@ jobs:
           - platform: linux/arm64
             os: ubuntu-24.04-arm
     runs-on: ${{ matrix.os }}
-    name: Build ${{ matrix.platform }} for GHCR
+    env:
+      GHCR_IMAGE: ${{ needs.resolve_release.outputs.ghcr-image }}
     steps:
       - name: Prepare
         run: |
           platform=${{ matrix.platform }}
-          echo "PLATFORM_PAIR=${platform//\//-}" >> $GITHUB_ENV    
-
-      - name: Checkout base
+          echo "PLATFORM_PAIR=${platform//\//-}" >> "$GITHUB_ENV"
+      - name: Checkout release tag
         uses: actions/checkout@v4
         with:
+          ref: ${{ needs.resolve_release.outputs.tag }}
           fetch-depth: 0
-
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
-
-      - name: Docker meta
-        id: meta
-        uses: docker/metadata-action@v5
-        with:
-          images: ${{ env.GHCR_IMAGE }}
-          tags: |
-            type=semver,pattern={{version}}
-            type=raw,value=latest,enable={{is_default_branch}}
       - name: Login to GitHub Container Registry
         uses: docker/login-action@v3
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Get commit SHA
-        if: github.ref == 'refs/heads/master'
-        id: vars
-        run: echo "sha_short=$(git rev-parse --short HEAD)" >> $GITHUB_OUTPUT
-
-      - name: Build and export
+      - name: Build and export digest
         id: build
         uses: docker/build-push-action@v5
         with:
           platforms: ${{ matrix.platform }}
-          context: scripts/
-          labels: ${{ steps.meta.outputs.labels }}
-          build-args: |
-            SHA=${{ steps.vars.outputs.sha_short }}
+          context: .
+          file: scripts/Dockerfile
           outputs: type=image,name=${{ env.GHCR_IMAGE }},push-by-digest=true,name-canonical=true,push=true
-
       - name: Export digest
         run: |
-          rm -rf /tmp/digests-ghcr
           mkdir -p /tmp/digests-ghcr
           digest="${{ steps.build.outputs.digest }}"
           touch "/tmp/digests-ghcr/${digest#sha256:}"
-      - name: Upload artifact
+      - name: Upload digest
         uses: actions/upload-artifact@v4
         with:
           name: digest-ghcr-${{ env.PLATFORM_PAIR }}
@@ -159,9 +317,11 @@ jobs:
           if-no-files-found: error
           retention-days: 1
 
-  merge-dockerhub:
-    name: Merge Docker Hub
-    needs: build-dockerhub
+  merge_dockerhub:
+    name: Merge Docker Hub Manifest
+    needs:
+      - resolve_release
+      - build_dockerhub
     runs-on: ubuntu-latest
     steps:
       - name: Download digests
@@ -170,36 +330,36 @@ jobs:
           path: /tmp/digests-dockerhub
           pattern: digest-dockerhub-*
           merge-multiple: true
-
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
-
-      - name: Docker meta
-        id: meta
-        uses: docker/metadata-action@v5
-        with:
-          images: ${{ env.REGISTRY_IMAGE }}
-          tags: |
-            type=semver,pattern={{version}}
-            type=raw,value=latest,enable={{is_default_branch}}
-      - name: Docker login
+      - name: Login to Docker Hub
         uses: docker/login-action@v3
         with:
-          username: ${{ secrets.DOCKER_USERNAME }}
-          password: ${{ secrets.DOCKER_PASSWORD }}
-
-      - name: Create manifest list and push
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_PASSWORD }}
+      - name: Create and push manifest
         working-directory: /tmp/digests-dockerhub
+        env:
+          VERSION: ${{ needs.resolve_release.outputs.version }}
+          MINOR: ${{ needs.resolve_release.outputs.minor }}
+          PRERELEASE: ${{ needs.resolve_release.outputs.prerelease }}
         run: |
-          docker buildx imagetools create $(jq -cr '.tags | map("-t " + .) | join(" ")' <<< "$DOCKER_METADATA_OUTPUT_JSON") \
-            $(printf '${{ env.REGISTRY_IMAGE }}@sha256:%s ' *)
+          TAGS=(-t "$DOCKER_IMAGE:$VERSION")
+          if [[ "$PRERELEASE" != "true" ]]; then
+            TAGS+=(-t "$DOCKER_IMAGE:$MINOR" -t "$DOCKER_IMAGE:latest")
+          fi
+          docker buildx imagetools create "${TAGS[@]}" $(printf "$DOCKER_IMAGE@sha256:%s " *)
       - name: Inspect image
-        run: |
-          docker buildx imagetools inspect ${{ env.REGISTRY_IMAGE }}:${{ steps.meta.outputs.version }}
-  merge-ghcr:
-    name: Merge GHCR
-    needs: build-ghcr
+        run: docker buildx imagetools inspect "$DOCKER_IMAGE:${{ needs.resolve_release.outputs.version }}"
+
+  merge_ghcr:
+    name: Merge GHCR Manifest
+    needs:
+      - resolve_release
+      - build_ghcr
     runs-on: ubuntu-latest
+    env:
+      GHCR_IMAGE: ${{ needs.resolve_release.outputs.ghcr-image }}
     steps:
       - name: Download digests
         uses: actions/download-artifact@v4
@@ -207,30 +367,142 @@ jobs:
           path: /tmp/digests-ghcr
           pattern: digest-ghcr-*
           merge-multiple: true
-
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
-
-      - name: Docker meta
-        id: meta
-        uses: docker/metadata-action@v5
-        with:
-          images: ${{ env.GHCR_IMAGE }}
-          tags: |
-            type=semver,pattern={{version}}
-            type=raw,value=latest,enable={{is_default_branch}}
       - name: Login to GitHub Container Registry
         uses: docker/login-action@v3
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Create manifest list and push
+      - name: Create and push manifest
         working-directory: /tmp/digests-ghcr
+        env:
+          VERSION: ${{ needs.resolve_release.outputs.version }}
+          MINOR: ${{ needs.resolve_release.outputs.minor }}
+          PRERELEASE: ${{ needs.resolve_release.outputs.prerelease }}
         run: |
-          docker buildx imagetools create $(jq -cr '.tags | map("-t " + .) | join(" ")' <<< "$DOCKER_METADATA_OUTPUT_JSON") \
-            $(printf '${{ env.GHCR_IMAGE }}@sha256:%s ' *)
+          TAGS=(-t "$GHCR_IMAGE:$VERSION")
+          if [[ "$PRERELEASE" != "true" ]]; then
+            TAGS+=(-t "$GHCR_IMAGE:$MINOR" -t "$GHCR_IMAGE:latest")
+          fi
+          docker buildx imagetools create "${TAGS[@]}" $(printf "$GHCR_IMAGE@sha256:%s " *)
       - name: Inspect image
+        run: docker buildx imagetools inspect "$GHCR_IMAGE:${{ needs.resolve_release.outputs.version }}"
+
+  github_release:
+    name: Publish GitHub Release
+    needs:
+      - resolve_release
+      - linux_release
+      - macos_release
+      - windows_release
+      - merge_dockerhub
+      - merge_ghcr
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download release assets
+        uses: actions/download-artifact@v4
+        with:
+          path: release-assets
+          pattern: release-*
+          merge-multiple: true
+      - name: Generate checksums
+        working-directory: release-assets
         run: |
-          docker buildx imagetools inspect ${{ env.GHCR_IMAGE }}:${{ steps.meta.outputs.version }}
+          find . -maxdepth 1 -type f \( -name '*.tar.gz' -o -name '*.7z' \) -print0 \
+            | sort -z \
+            | xargs -0 sha256sum > checksums.txt
+          test -s checksums.txt
+      - name: Generate release notes
+        env:
+          TAG: ${{ needs.resolve_release.outputs.tag }}
+          VERSION: ${{ needs.resolve_release.outputs.version }}
+          PRERELEASE: ${{ needs.resolve_release.outputs.prerelease }}
+          SOURCE_SHA: ${{ needs.resolve_release.outputs.commit-sha }}
+          GHCR_IMAGE: ${{ needs.resolve_release.outputs.ghcr-image }}
+        run: |
+          if [[ "$PRERELEASE" == "true" ]]; then
+            RELEASE_TYPE="Beta / Prerelease"
+            LATEST_STATUS="Not updated"
+          else
+            RELEASE_TYPE="Stable"
+            LATEST_STATUS="Updated"
+          fi
+
+          {
+            echo "## Release Information"
+            echo
+            echo "- Version: \`$TAG\`"
+            echo "- Type: \`$RELEASE_TYPE\`"
+            echo "- Commit: [$SOURCE_SHA](${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/commit/$SOURCE_SHA)"
+            echo "- Workflow: [#${GITHUB_RUN_NUMBER}](${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID})"
+            echo
+            echo "## Native Assets"
+            echo
+            echo "- Linux: x86, amd64, armv7, aarch64"
+            echo "- macOS: Intel, Apple Silicon"
+            echo "- Windows: x86, amd64"
+            echo "- SHA256: \`checksums.txt\`"
+            echo
+            echo "## Docker Images"
+            echo
+            echo "- Docker Hub: \`${DOCKER_IMAGE}:$VERSION\`"
+            echo "- GHCR: \`${GHCR_IMAGE}:$VERSION\`"
+            echo "- Latest: \`$LATEST_STATUS\`"
+          } > release-notes.md
+      - name: Create or update GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ needs.resolve_release.outputs.tag }}
+          name: subconverter ${{ needs.resolve_release.outputs.tag }}
+          body_path: release-notes.md
+          generate_release_notes: true
+          draft: false
+          prerelease: ${{ needs.resolve_release.outputs.prerelease }}
+          make_latest: ${{ needs.resolve_release.outputs.prerelease == 'true' && 'false' || 'true' }}
+          fail_on_unmatched_files: true
+          files: |
+            release-assets/*.tar.gz
+            release-assets/*.7z
+            release-assets/checksums.txt
+
+  notify:
+    name: Telegram Release Notification
+    env:
+      TELEGRAM_TO: ${{ secrets.TELEGRAM_TO }}
+      TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
+    if: ${{ always() }}
+    needs:
+      - resolve_release
+      - linux_release
+      - macos_release
+      - windows_release
+      - merge_dockerhub
+      - merge_ghcr
+      - github_release
+    runs-on: ubuntu-latest
+    steps:
+      - name: Telegram notification
+        if: ${{ env.TELEGRAM_TO != '' && env.TELEGRAM_TOKEN != '' }}
+        continue-on-error: true
+        uses: appleboy/telegram-action@v1.0.1
+        with:
+          to: ${{ env.TELEGRAM_TO }}
+          token: ${{ env.TELEGRAM_TOKEN }}
+          format: markdown
+          message: |
+            *subconverter 发布报告*
+
+            *状态*: `${{ needs.github_release.result == 'success' && '🚀 发布成功' || '❌ 发布失败' }}`
+            *标签*: `${{ needs.resolve_release.outputs.tag }}`
+            *类型*: `${{ needs.resolve_release.outputs.prerelease == 'true' && 'Beta / Prerelease' || 'Stable' }}`
+            *Linux*: `${{ needs.linux_release.result }}`
+            *macOS*: `${{ needs.macos_release.result }}`
+            *Windows*: `${{ needs.windows_release.result }}`
+            *Docker Hub*: `${{ needs.merge_dockerhub.result }}`
+            *GHCR*: `${{ needs.merge_ghcr.result }}`
+            *GitHub Release*: `${{ needs.github_release.result }}`
+            *提交*: [${{ needs.resolve_release.outputs.commit-sha }}](${{ github.server_url }}/${{ github.repository }}/commit/${{ needs.resolve_release.outputs.commit-sha }})
+            *工作流*: [#${{ github.run_number }}](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})
+            *触发人*: `${{ github.actor }}`
