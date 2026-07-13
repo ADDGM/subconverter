@@ -1,0 +1,119 @@
+name: Workflow Lint
+
+on:
+  push:
+    branches: [develop]
+    paths:
+      - ".github/workflows/**"
+  pull_request:
+    branches: [develop]
+    paths:
+      - ".github/workflows/**"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.ref }}-${{ github.workflow }}
+  cancel-in-progress: true
+
+jobs:
+  actionlint:
+    name: Lint GitHub Actions workflows
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      - name: Run actionlint
+        uses: docker://rhysd/actionlint:1.7.12
+        with:
+          args: -color
+      - name: Check workflow policies
+        shell: bash
+        run: |
+          python3 <<'PY'
+          import re
+          from pathlib import Path
+
+          workflow_dir = Path(".github/workflows")
+          workflow_paths = sorted(
+              {*workflow_dir.glob("*.yml"), *workflow_dir.glob("*.yaml")}
+          )
+
+          def split_job_blocks(path):
+              text = path.read_text(encoding="utf-8")
+              try:
+                  jobs = text.split("\njobs:\n", 1)[1]
+              except IndexError as error:
+                  raise AssertionError(f"{path}: missing jobs section") from error
+
+              matches = list(re.finditer(r"(?m)^  ([A-Za-z0-9_-]+):\s*$", jobs))
+              assert matches, f"{path}: no jobs found"
+              return {
+                  match.group(1): jobs[
+                      match.start() : matches[index + 1].start()
+                      if index + 1 < len(matches)
+                      else len(jobs)
+                  ]
+                  for index, match in enumerate(matches)
+              }
+
+          workflow_jobs = {
+              path: split_job_blocks(path)
+              for path in workflow_paths
+          }
+
+          missing_timeouts = [
+              f"{path}:{job}"
+              for path, jobs in workflow_jobs.items()
+              for job, block in jobs.items()
+              if not re.search(
+                  r"(?m)^    timeout-minutes:\s*[1-9][0-9]*\s*$",
+                  block,
+              )
+          ]
+          assert not missing_timeouts, (
+              "Jobs without timeout-minutes: " + ", ".join(missing_timeouts)
+          )
+
+          build_path = workflow_dir / "build.yml"
+          build_header = build_path.read_text(encoding="utf-8").split(
+              "\njobs:\n",
+              1,
+          )[0]
+          assert "branches: [develop]" in build_header
+          assert "master" not in build_header
+          assert "\n    tags:" not in build_header
+
+          release_path = workflow_dir / "docker.yml"
+          release_text = release_path.read_text(encoding="utf-8")
+          release_header = release_text.split("\njobs:\n", 1)[0]
+          assert '      - "v*"' in release_header
+          assert "\n    branches:" not in release_header
+          assert "permissions:\n  contents: read" in release_header
+          assert "packages: write" not in release_header
+
+          release_jobs = workflow_jobs[release_path]
+          package_writers = {
+              job
+              for job, block in release_jobs.items()
+              if "packages: write" in block
+          }
+          content_writers = {
+              job
+              for job, block in release_jobs.items()
+              if "contents: write" in block
+          }
+          assert package_writers == {"build_ghcr", "merge_ghcr"}
+          assert content_writers == {"github_release"}
+
+          for path in (build_path, release_path):
+              notify = workflow_jobs[path]["notify"]
+              assert "strategy:" not in notify
+              assert "continue-on-error: true" in notify
+              assert "Report skipped notification" in notify
+
+          print(f"Validated {len(workflow_paths)} workflow files.")
+          PY

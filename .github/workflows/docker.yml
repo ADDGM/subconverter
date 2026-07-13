@@ -12,8 +12,7 @@ on:
         type: string
 
 permissions:
-  contents: write
-  packages: write
+  contents: read
 
 concurrency:
   group: release-${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
@@ -26,6 +25,7 @@ jobs:
   resolve_release:
     name: Resolve Release
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     outputs:
       tag: ${{ steps.release.outputs.tag }}
       version: ${{ steps.release.outputs.version }}
@@ -124,6 +124,7 @@ jobs:
             artifact: subconverter_aarch64
             os: ubuntu-24.04-arm
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
     steps:
       - name: Checkout release tag
         uses: actions/checkout@v4
@@ -155,6 +156,7 @@ jobs:
             artifact: subconverter_darwinarm
             os: macos-latest
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
     steps:
       - name: Checkout release tag
         uses: actions/checkout@v4
@@ -192,6 +194,7 @@ jobs:
             env: x86_64
             msystem: MINGW64
     runs-on: windows-latest
+    timeout-minutes: 60
     defaults:
       run:
         shell: msys2 {0}
@@ -243,6 +246,7 @@ jobs:
           - platform: linux/arm64
             os: ubuntu-24.04-arm
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 90
     steps:
       - name: Prepare
         run: |
@@ -284,6 +288,9 @@ jobs:
   build_ghcr:
     name: Build ${{ matrix.platform }} for GHCR
     needs: resolve_release
+    permissions:
+      contents: read
+      packages: write
     strategy:
       fail-fast: false
       matrix:
@@ -297,6 +304,7 @@ jobs:
           - platform: linux/arm64
             os: ubuntu-24.04-arm
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 90
     env:
       GHCR_IMAGE: ${{ needs.resolve_release.outputs.ghcr-image }}
     steps:
@@ -344,6 +352,7 @@ jobs:
       - resolve_release
       - build_dockerhub
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - name: Download digests
         uses: actions/download-artifact@v4
@@ -378,7 +387,11 @@ jobs:
     needs:
       - resolve_release
       - build_ghcr
+    permissions:
+      contents: read
+      packages: write
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     env:
       GHCR_IMAGE: ${{ needs.resolve_release.outputs.ghcr-image }}
     steps:
@@ -420,7 +433,10 @@ jobs:
       - windows_release
       - merge_dockerhub
       - merge_ghcr
+    permissions:
+      contents: write
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - name: Download release assets
         uses: actions/download-artifact@v4
@@ -503,6 +519,7 @@ jobs:
       - merge_ghcr
       - github_release
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     steps:
       - name: Telegram notification
         if: ${{ env.TELEGRAM_TO != '' && env.TELEGRAM_TOKEN != '' }}
@@ -515,9 +532,10 @@ jobs:
           message: |
             *subconverter 发布报告*
 
-            *状态*: `${{ needs.github_release.result == 'success' && '🚀 发布成功' || '❌ 发布失败' }}`
+            *状态*: `${{ (needs.resolve_release.result == 'failure' || needs.linux_release.result == 'failure' || needs.macos_release.result == 'failure' || needs.windows_release.result == 'failure' || needs.merge_dockerhub.result == 'failure' || needs.merge_ghcr.result == 'failure' || needs.github_release.result == 'failure') && '❌ 发布失败' || (needs.resolve_release.result == 'cancelled' || needs.linux_release.result == 'cancelled' || needs.macos_release.result == 'cancelled' || needs.windows_release.result == 'cancelled' || needs.merge_dockerhub.result == 'cancelled' || needs.merge_ghcr.result == 'cancelled' || needs.github_release.result == 'cancelled') && '⚪ 发布取消' || needs.github_release.result == 'success' && '🚀 发布成功' || '⚠️ 发布未完成' }}`
             *标签*: `${{ needs.resolve_release.outputs.tag }}`
             *类型*: `${{ needs.resolve_release.outputs.prerelease == 'true' && 'Beta / Prerelease' || 'Stable' }}`
+            *解析*: `${{ needs.resolve_release.result }}`
             *Linux*: `${{ needs.linux_release.result }}`
             *macOS*: `${{ needs.macos_release.result }}`
             *Windows*: `${{ needs.windows_release.result }}`
@@ -527,3 +545,11 @@ jobs:
             *提交*: [${{ needs.resolve_release.outputs.commit-sha }}](${{ github.server_url }}/${{ github.repository }}/commit/${{ needs.resolve_release.outputs.commit-sha }})
             *工作流*: [#${{ github.run_number }}](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})
             *触发人*: `${{ github.actor }}`
+      - name: Report skipped notification
+        if: ${{ env.TELEGRAM_TO == '' || env.TELEGRAM_TOKEN == '' }}
+        run: |
+          {
+            echo "### Telegram notification skipped"
+            echo
+            echo "TELEGRAM_TO or TELEGRAM_TOKEN is not configured."
+          } >> "$GITHUB_STEP_SUMMARY"
