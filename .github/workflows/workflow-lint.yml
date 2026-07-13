@@ -24,13 +24,21 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - name: Checkout repository
+      - name: 检出仓库
         uses: actions/checkout@v4
-      - name: Run actionlint
-        uses: docker://rhysd/actionlint:1.7.12
-        with:
-          args: -color
-      - name: Check workflow policies
+      - name: 下载 actionlint
+        id: get_actionlint
+        shell: bash
+        run: |
+          script="$RUNNER_TEMP/download-actionlint.bash"
+          curl --fail --silent --show-error --location \
+            --output "$script" \
+            https://raw.githubusercontent.com/rhysd/actionlint/v1.7.12/scripts/download-actionlint.bash
+          bash "$script" 1.7.12 "$RUNNER_TEMP"
+      - name: 运行 actionlint
+        shell: bash
+        run: ${{ steps.get_actionlint.outputs.executable }} -color
+      - name: 检查工作流策略
         shell: bash
         run: |
           python3 <<'PY'
