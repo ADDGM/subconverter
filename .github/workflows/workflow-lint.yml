@@ -134,6 +134,23 @@ jobs:
               manifest = release_jobs[job]
               assert "build_images" in manifest
               assert "pattern: digest-*" in manifest
+              assert "steps.image.outputs.reference" in manifest
+              assert "steps.image.outputs.digest" in manifest
+              assert "id: image" in manifest
+              assert 'echo "reference=$IMAGE_REFERENCE"' in manifest
+              assert 'echo "digest=$digest"' in manifest
+
+          github_release = release_jobs["github_release"]
+          assert "overwrite_files: true" in github_release
+          assert "append_body: false" in github_release
+          assert "needs.merge_dockerhub.outputs.reference" in github_release
+          assert "needs.merge_dockerhub.outputs.digest" in github_release
+          assert "needs.merge_ghcr.outputs.reference" in github_release
+          assert "needs.merge_ghcr.outputs.digest" in github_release
+          assert "DOCKERHUB_DIGEST" in github_release
+          assert "GHCR_DIGEST" in github_release
+          assert "@$DOCKERHUB_DIGEST" in github_release
+          assert "@$GHCR_DIGEST" in github_release
 
           for path in (build_path, release_path):
               notify = workflow_jobs[path]["notify"]

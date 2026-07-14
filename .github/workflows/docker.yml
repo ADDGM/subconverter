@@ -307,6 +307,9 @@ jobs:
       - build_images
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    outputs:
+      reference: ${{ steps.image.outputs.reference }}
+      digest: ${{ steps.image.outputs.digest }}
     steps:
       - name: Download digests
         uses: actions/download-artifact@v4
@@ -340,7 +343,21 @@ jobs:
           done
           docker buildx imagetools create "${TAGS[@]}" "${SOURCES[@]}"
       - name: Inspect image
-        run: docker buildx imagetools inspect "$DOCKER_IMAGE:${{ needs.resolve_release.outputs.version }}"
+        id: image
+        env:
+          IMAGE_REFERENCE: ${{ env.DOCKER_IMAGE }}:${{ needs.resolve_release.outputs.version }}
+        run: |
+          inspection="$(docker buildx imagetools inspect "$IMAGE_REFERENCE")"
+          printf '%s\n' "$inspection"
+          digest="$(printf '%s\n' "$inspection" | awk '$1 == "Digest:" { print $2; exit }')"
+          if [[ ! "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+            echo "Unable to resolve Docker Hub manifest digest"
+            exit 1
+          fi
+          {
+            echo "reference=$IMAGE_REFERENCE"
+            echo "digest=$digest"
+          } >> "$GITHUB_OUTPUT"
 
   merge_ghcr:
     name: Merge GHCR Manifest
@@ -352,6 +369,9 @@ jobs:
       packages: write
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    outputs:
+      reference: ${{ steps.image.outputs.reference }}
+      digest: ${{ steps.image.outputs.digest }}
     env:
       GHCR_IMAGE: ${{ needs.resolve_release.outputs.ghcr-image }}
     steps:
@@ -388,7 +408,21 @@ jobs:
           done
           docker buildx imagetools create "${TAGS[@]}" "${SOURCES[@]}"
       - name: Inspect image
-        run: docker buildx imagetools inspect "$GHCR_IMAGE:${{ needs.resolve_release.outputs.version }}"
+        id: image
+        env:
+          IMAGE_REFERENCE: ${{ env.GHCR_IMAGE }}:${{ needs.resolve_release.outputs.version }}
+        run: |
+          inspection="$(docker buildx imagetools inspect "$IMAGE_REFERENCE")"
+          printf '%s\n' "$inspection"
+          digest="$(printf '%s\n' "$inspection" | awk '$1 == "Digest:" { print $2; exit }')"
+          if [[ ! "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+            echo "Unable to resolve GHCR manifest digest"
+            exit 1
+          fi
+          {
+            echo "reference=$IMAGE_REFERENCE"
+            echo "digest=$digest"
+          } >> "$GITHUB_OUTPUT"
 
   github_release:
     name: Publish GitHub Release
@@ -420,11 +454,19 @@ jobs:
       - name: Generate release notes
         env:
           TAG: ${{ needs.resolve_release.outputs.tag }}
-          VERSION: ${{ needs.resolve_release.outputs.version }}
           PRERELEASE: ${{ needs.resolve_release.outputs.prerelease }}
           SOURCE_SHA: ${{ needs.resolve_release.outputs.commit-sha }}
-          GHCR_IMAGE: ${{ needs.resolve_release.outputs.ghcr-image }}
+          DOCKERHUB_REFERENCE: ${{ needs.merge_dockerhub.outputs.reference }}
+          DOCKERHUB_DIGEST: ${{ needs.merge_dockerhub.outputs.digest }}
+          GHCR_REFERENCE: ${{ needs.merge_ghcr.outputs.reference }}
+          GHCR_DIGEST: ${{ needs.merge_ghcr.outputs.digest }}
         run: |
+          if [[ ! "$DOCKERHUB_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]] ||
+             [[ ! "$GHCR_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+            echo "Unable to resolve release manifest digests"
+            exit 1
+          fi
+
           if [[ "$PRERELEASE" == "true" ]]; then
             RELEASE_TYPE="Beta / Prerelease"
             LATEST_STATUS="Not updated"
@@ -450,8 +492,8 @@ jobs:
             echo
             echo "## Docker Images"
             echo
-            echo "- Docker Hub: \`${DOCKER_IMAGE}:$VERSION\`"
-            echo "- GHCR: \`${GHCR_IMAGE}:$VERSION\`"
+            echo "- Docker Hub: \`${DOCKERHUB_REFERENCE}@$DOCKERHUB_DIGEST\`"
+            echo "- GHCR: \`${GHCR_REFERENCE}@$GHCR_DIGEST\`"
             echo "- Latest: \`$LATEST_STATUS\`"
           } > release-notes.md
       - name: Create or update GitHub Release
@@ -461,6 +503,8 @@ jobs:
           name: subconverter ${{ needs.resolve_release.outputs.tag }}
           body_path: release-notes.md
           generate_release_notes: true
+          overwrite_files: true
+          append_body: false
           draft: false
           prerelease: ${{ needs.resolve_release.outputs.prerelease }}
           make_latest: ${{ needs.resolve_release.outputs.prerelease == 'true' && 'false' || 'true' }}
