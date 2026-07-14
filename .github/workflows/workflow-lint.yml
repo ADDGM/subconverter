@@ -114,8 +114,26 @@ jobs:
               for job, block in release_jobs.items()
               if "contents: write" in block
           }
-          assert package_writers == {"build_ghcr", "merge_ghcr"}
+          assert package_writers == {"build_images", "merge_ghcr"}
           assert content_writers == {"github_release"}
+
+          assert "build_dockerhub" not in release_jobs
+          assert "build_ghcr" not in release_jobs
+          build_images = release_jobs["build_images"]
+          assert build_images.count("docker/login-action@v3") == 2
+          assert build_images.count("docker/build-push-action@v5") == 1
+          assert "cache-from: type=gha,scope=release-" in build_images
+          assert "cache-to: type=gha,mode=max,scope=release-" in build_images
+          assert "env.DOCKER_IMAGE" in build_images
+          assert "env.GHCR_IMAGE" in build_images
+          assert "name: digest-" in build_images
+          assert "digest-dockerhub-" not in release_text
+          assert "digest-ghcr-" not in release_text
+
+          for job in ("merge_dockerhub", "merge_ghcr"):
+              manifest = release_jobs[job]
+              assert "build_images" in manifest
+              assert "pattern: digest-*" in manifest
 
           for path in (build_path, release_path):
               notify = workflow_jobs[path]["notify"]
