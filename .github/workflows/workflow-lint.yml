@@ -134,16 +134,24 @@ jobs:
               manifest = release_jobs[job]
               assert "build_images" in manifest
               assert "pattern: digest-*" in manifest
-              assert "steps.image.outputs.reference" in manifest
               assert "steps.image.outputs.digest" in manifest
               assert "id: image" in manifest
-              assert 'echo "reference=$IMAGE_REFERENCE"' in manifest
               assert 'echo "digest=$digest"' in manifest
+
+          dockerhub_manifest = release_jobs["merge_dockerhub"]
+          assert "steps.image.outputs.reference" not in dockerhub_manifest
+          assert 'echo "reference=$IMAGE_REFERENCE"' not in dockerhub_manifest
+
+          ghcr_manifest = release_jobs["merge_ghcr"]
+          assert "steps.image.outputs.reference" in ghcr_manifest
+          assert 'echo "reference=$IMAGE_REFERENCE"' in ghcr_manifest
 
           github_release = release_jobs["github_release"]
           assert "overwrite_files: true" in github_release
           assert "append_body: false" in github_release
-          assert "needs.merge_dockerhub.outputs.reference" in github_release
+          assert "needs.merge_dockerhub.outputs.reference" not in github_release
+          assert "env.DOCKER_IMAGE" in github_release
+          assert "needs.resolve_release.outputs.version" in github_release
           assert "needs.merge_dockerhub.outputs.digest" in github_release
           assert "needs.merge_ghcr.outputs.reference" in github_release
           assert "needs.merge_ghcr.outputs.digest" in github_release

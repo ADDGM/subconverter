@@ -308,7 +308,6 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     outputs:
-      reference: ${{ steps.image.outputs.reference }}
       digest: ${{ steps.image.outputs.digest }}
     steps:
       - name: Download digests
@@ -354,10 +353,7 @@ jobs:
             echo "Unable to resolve Docker Hub manifest digest"
             exit 1
           fi
-          {
-            echo "reference=$IMAGE_REFERENCE"
-            echo "digest=$digest"
-          } >> "$GITHUB_OUTPUT"
+          echo "digest=$digest" >> "$GITHUB_OUTPUT"
 
   merge_ghcr:
     name: Merge GHCR Manifest
@@ -456,11 +452,16 @@ jobs:
           TAG: ${{ needs.resolve_release.outputs.tag }}
           PRERELEASE: ${{ needs.resolve_release.outputs.prerelease }}
           SOURCE_SHA: ${{ needs.resolve_release.outputs.commit-sha }}
-          DOCKERHUB_REFERENCE: ${{ needs.merge_dockerhub.outputs.reference }}
+          DOCKERHUB_REFERENCE: ${{ env.DOCKER_IMAGE }}:${{ needs.resolve_release.outputs.version }}
           DOCKERHUB_DIGEST: ${{ needs.merge_dockerhub.outputs.digest }}
           GHCR_REFERENCE: ${{ needs.merge_ghcr.outputs.reference }}
           GHCR_DIGEST: ${{ needs.merge_ghcr.outputs.digest }}
         run: |
+          if [[ -z "$DOCKERHUB_REFERENCE" || -z "$GHCR_REFERENCE" ]]; then
+            echo "Unable to resolve release image references"
+            exit 1
+          fi
+
           if [[ ! "$DOCKERHUB_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]] ||
              [[ ! "$GHCR_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]; then
             echo "Unable to resolve release manifest digests"
